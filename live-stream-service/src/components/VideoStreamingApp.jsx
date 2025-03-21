@@ -15,6 +15,8 @@ const VideoStreamingApp = () => {
   const [newRoomId, setNewRoomId] = useState('');
   const [isMuted, setIsMuted] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
+  const [userName, setUserName] = useState('');
+  const [participants, setParticipants] = useState(new Map());
   
   const socketRef = useRef();
   const userVideoRef = useRef();
@@ -23,6 +25,10 @@ const VideoStreamingApp = () => {
   
   // Room creation or joining
   const createRoom = () => {
+    if (!userName.trim()) {
+      alert('Please enter your name');
+      return;
+    }
     const generatedRoomId = Math.random().toString(36).substring(2, 7);
     setRoomId(generatedRoomId);
     setIsStreamer(true);
@@ -32,44 +38,73 @@ const VideoStreamingApp = () => {
   };
   
   const joinRoom = () => {
-    if (newRoomId) {
-      setRoomId(newRoomId);
-      setIsStreamer(false);
-      setJoinedRoom(true);
-      navigate(`/room/${newRoomId}`, { replace: true });
-      initializeRoom(newRoomId, false);
+    if (!userName.trim()) {
+      alert('Please enter your name');
+      return;
     }
+    if (!newRoomId) {
+      alert('Please enter a room ID');
+      return;
+    }
+    setRoomId(newRoomId);
+    setIsStreamer(false);
+    setJoinedRoom(true);
+    navigate(`/room/${newRoomId}`, { replace: true });
+    initializeRoom(newRoomId, false);
   };
   
   const initializeRoom = async (roomId, isStreamer) => {
     socketRef.current = io.connect('http://localhost:5001');
     
-    // Get audio only by default
     try {
+      // Get audio only by default
       const audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
         video: false
       });
       
-      socketRef.current.emit('join-room', roomId);
+      // Send user info when joining room
+      socketRef.current.emit('join-room', {
+        roomId,
+        userName: userName.trim(),
+        isStreamer
+      });
       
       // If streamer, they need to start a share explicitly
       if (isStreamer) {
-        // We'll just use audio initially, screen share starts on button click
         screenStreamRef.current = audioStream;
       }
       
       // When a new user connects
-      socketRef.current.on('user-connected', userId => {
-        console.log('User connected:', userId);
-        const peer = createPeer(userId, socketRef.current.id, screenStreamRef.current || audioStream);
+      socketRef.current.on('user-connected', ({ userId, userName: newUserName }) => {
+        console.log('User connected:', userId, newUserName);
+        setParticipants(prev => new Map(prev).set(userId, newUserName));
         
-        peersRef.current.push({
-          peerId: userId,
-          peer,
+        // Only create peer if we're the streamer or if the new user is the streamer
+        const shouldCreatePeer = isStreamer || (peers.length === 0 && !isStreamer);
+        if (shouldCreatePeer) {
+          const peer = createPeer(userId, socketRef.current.id, screenStreamRef.current || audioStream);
+          
+          peersRef.current.push({
+            peerId: userId,
+            peer,
+            userName: newUserName
+          });
+          
+          setPeers(prevPeers => [...prevPeers, { peerId: userId, peer, userName: newUserName }]);
+        }
+      });
+      
+      // Receiving room info
+      socketRef.current.on('room-info', ({ participants: roomParticipants }) => {
+        const participantsMap = new Map();
+        roomParticipants.forEach(({ id, name }) => {
+          participantsMap.set(id, name);
         });
-        
-        setPeers(prevPeers => [...prevPeers, { peerId: userId, peer }]);
+        setParticipants(participantsMap);
       });
       
       // Receiving a call
@@ -77,12 +112,15 @@ const VideoStreamingApp = () => {
         console.log('User joined with signal:', payload);
         const peer = addPeer(payload.signal, payload.callerId, screenStreamRef.current || audioStream);
         
+        const userName = participants.get(payload.callerId) || 'Unknown User';
+        
         peersRef.current.push({
           peerId: payload.callerId,
           peer,
+          userName
         });
         
-        setPeers(prevPeers => [...prevPeers, { peerId: payload.callerId, peer }]);
+        setPeers(prevPeers => [...prevPeers, { peerId: payload.callerId, peer, userName }]);
       });
       
       // Receiving returned signal
@@ -111,98 +149,122 @@ const VideoStreamingApp = () => {
   };
   
   // Start screen sharing
-  // In your VideoStreamingApp.js, update the startScreenShare function:
-
-const startScreenShare = async () => {
-  try {
-    const screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        cursor: 'always',
-        displaySurface: 'monitor',
-        logicalSurface: true,
-        frameRate: 60,
-        height: 1080,
-        width: 1920
-      }
-    });
-    
-    // Store the screen stream reference
-    screenStreamRef.current = screenStream;
-    
-    // Add audio tracks to the screen stream
-    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioStream.getAudioTracks().forEach(track => {
-      screenStreamRef.current.addTrack(track);
-    });
-    
-    // IMPORTANT: Make sure to set the srcObject property properly
-    if (userVideoRef.current) {
-      userVideoRef.current.srcObject = screenStreamRef.current;
-      // Ensure the video element is visible
-      userVideoRef.current.style.display = 'block';
-      // Ensure autoplay is enabled
-      userVideoRef.current.autoplay = true;
-    }
-    
-    // Listen for the end of screen sharing
-    screenStream.getVideoTracks()[0].onended = () => {
-      stopScreenShare();
-    };
-    
-    // Update all existing peers with the new stream
-    peersRef.current.forEach(({ peer }) => {
-      // Replace all tracks
-      screenStreamRef.current.getTracks().forEach(track => {
-        const senders = peer._pc.getSenders();
-        const sender = senders.find(s => s.track && s.track.kind === track.kind);
-        if (sender) {
-          sender.replaceTrack(track);
-        } else {
-          peer.addTrack(track, screenStreamRef.current);
+  const startScreenShare = async () => {
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always',
+          displaySurface: 'monitor',
+          logicalSurface: true,
+          frameRate: 30,
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
         }
       });
-    });
-    
-    setIsSharing(true);
-    
-    // Log to confirm stream is active
-    console.log('Screen sharing started, tracks:', screenStreamRef.current.getTracks().map(t => t.kind));
-  } catch (err) {
-    console.error('Error starting screen share:', err);
-  }
-};
+      
+      // Store the screen stream reference
+      screenStreamRef.current = screenStream;
+      
+      // Add audio tracks if not present in screen share
+      const hasAudio = screenStream.getAudioTracks().length > 0;
+      if (!hasAudio) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+            }
+          });
+          audioStream.getAudioTracks().forEach(track => {
+            screenStreamRef.current.addTrack(track);
+          });
+        } catch (err) {
+          console.warn('Could not add audio to screen share:', err);
+        }
+      }
+      
+      // Set up screen share end handler
+      screenStream.getVideoTracks()[0].onended = () => {
+        stopScreenShare();
+      };
+
+      // Update video element
+      if (userVideoRef.current) {
+        userVideoRef.current.srcObject = screenStreamRef.current;
+        userVideoRef.current.style.display = 'block';
+      }
+      
+      // Update all existing peers with the new stream
+      peersRef.current.forEach(({ peer }) => {
+        // First remove any existing tracks
+        const senders = peer._pc.getSenders();
+        senders.forEach(sender => {
+          if (sender.track) {
+            peer._pc.removeTrack(sender);
+          }
+        });
+
+        // Then add the new tracks
+        screenStreamRef.current.getTracks().forEach(track => {
+          peer.addTrack(track, screenStreamRef.current);
+        });
+      });
+      
+      setIsSharing(true);
+    } catch (err) {
+      console.error('Error starting screen share:', err);
+      setIsSharing(false);
+    }
+  };
   
   // Stop screen sharing
   const stopScreenShare = async () => {
     try {
       if (screenStreamRef.current) {
+        // Stop all tracks
         screenStreamRef.current.getTracks().forEach(track => {
           track.stop();
         });
-        
-        // Get audio only stream to replace
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        screenStreamRef.current = audioStream;
-        
+
+        // Clear video element
         if (userVideoRef.current) {
           userVideoRef.current.srcObject = null;
         }
-        
-        // Update peers with audio-only stream
+
+        // Get new audio-only stream for continued participation
+        const audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+          }
+        });
+
+        // Update screen stream reference
+        screenStreamRef.current = audioStream;
+
+        // Update all peers with audio-only stream
         peersRef.current.forEach(({ peer }) => {
-          audioStream.getTracks().forEach(track => {
-            const senders = peer._pc.getSenders();
-            const sender = senders.find(s => s.track && s.track.kind === track.kind);
-            if (sender) {
-              sender.replaceTrack(track);
+          // Remove all existing tracks
+          const senders = peer._pc.getSenders();
+          senders.forEach(sender => {
+            if (sender.track) {
+              peer._pc.removeTrack(sender);
             }
           });
+
+          // Add new audio track
+          audioStream.getAudioTracks().forEach(track => {
+            peer.addTrack(track, audioStream);
+          });
         });
+
+        setIsSharing(false);
       }
-      
-      setIsSharing(false);
     } catch (err) {
       console.error('Error stopping screen share:', err);
+      setIsSharing(false);
     }
   };
   
@@ -212,10 +274,41 @@ const startScreenShare = async () => {
       initiator: true,
       trickle: false,
       stream,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+      },
+      reconnectTimer: 1000,
+      iceTransportPolicy: 'all',
     });
     
     peer.on('signal', signal => {
       socketRef.current.emit('sending-signal', { userToSignal, callerId, signal });
+    });
+    
+    peer.on('connect', () => {
+      console.log('Peer connection established');
+    });
+    
+    peer.on('error', err => {
+      console.error('Peer connection error:', err);
+      // Attempt to reconnect on error
+      if (peer && !peer.destroyed) {
+        peer.destroy();
+        const newPeer = createPeer(userToSignal, callerId, stream);
+        // Update the peers list with the new peer
+        setPeers(prevPeers => {
+          const peerIndex = prevPeers.findIndex(p => p.peerId === userToSignal);
+          if (peerIndex !== -1) {
+            const newPeers = [...prevPeers];
+            newPeers[peerIndex] = { peerId: userToSignal, peer: newPeer };
+            return newPeers;
+          }
+          return prevPeers;
+        });
+      }
     });
     
     return peer;
@@ -227,10 +320,41 @@ const startScreenShare = async () => {
       initiator: false,
       trickle: false,
       stream,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+      },
+      reconnectTimer: 1000,
+      iceTransportPolicy: 'all',
     });
     
     peer.on('signal', signal => {
       socketRef.current.emit('returning-signal', { signal, callerId });
+    });
+    
+    peer.on('connect', () => {
+      console.log('Peer connection established');
+    });
+    
+    peer.on('error', err => {
+      console.error('Peer connection error:', err);
+      // Attempt to reconnect on error
+      if (peer && !peer.destroyed) {
+        peer.destroy();
+        const newPeer = addPeer(incomingSignal, callerId, stream);
+        // Update the peers list with the new peer
+        setPeers(prevPeers => {
+          const peerIndex = prevPeers.findIndex(p => p.peerId === callerId);
+          if (peerIndex !== -1) {
+            const newPeers = [...prevPeers];
+            newPeers[peerIndex] = { peerId: callerId, peer: newPeer };
+            return newPeers;
+          }
+          return prevPeers;
+        });
+      }
     });
     
     peer.signal(incomingSignal);
@@ -283,25 +407,32 @@ const startScreenShare = async () => {
         <div className="flex flex-col items-center justify-center flex-grow space-y-6">
           <h1 className="text-3xl font-bold">Game Streaming App</h1>
           <div className="flex flex-col space-y-4 w-full max-w-md">
+            <input
+              type="text"
+              placeholder="Enter Your Name"
+              value={userName}
+              onChange={(e) => setUserName(e.target.value)}
+              className="bg-gray-800 text-white px-4 py-2 rounded"
+            />
             <button 
               onClick={createRoom} 
               className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded"
             >
               Create Streaming Room
             </button>
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-col space-y-2">
               <input
                 type="text"
                 placeholder="Enter Room ID"
                 value={newRoomId}
                 onChange={(e) => setNewRoomId(e.target.value)}
-                className="bg-gray-800 text-white px-4 py-2 rounded flex-grow"
+                className="bg-gray-800 text-white px-4 py-2 rounded"
               />
               <button 
                 onClick={joinRoom} 
                 className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
               >
-                Join
+                Join Stream
               </button>
             </div>
           </div>
@@ -330,17 +461,7 @@ const startScreenShare = async () => {
           </div>
           
           <div className="grid grid-cols-1 gap-4 flex-grow">
-            {isStreamer && isSharing && (
-              <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
-                <video ref={userVideoRef} autoPlay muted className="w-full h-full object-contain" />
-                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded">
-                  You (Streaming)
-                </div>
-              </div>
-            )}
-            
-            {/* Replace this section in your return statement */}
-
+            {/* Streamer's view */}
             {isStreamer && (
               <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
                 <video 
@@ -356,23 +477,33 @@ const startScreenShare = async () => {
               </div>
             )}
             
-            {/* Voice chat participants */}
+            {/* Viewer's view */}
+            {!isStreamer && peers.length > 0 && (
+              <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
+                <Video peer={peers[0].peer} />
+                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded">
+                  {peers[0].userName || 'Streamer'}
+                </div>
+              </div>
+            )}
+            
+            {/* Updated participants list */}
             <div className="bg-gray-800 rounded-lg p-4">
-              <h3 className="text-xl font-semibold mb-2">Voice Chat Participants</h3>
+              <h3 className="text-xl font-semibold mb-2">Participants</h3>
               <div className="space-y-2">
                 <div className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
                   <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
                     <span>You</span>
                   </div>
-                  <span>You {isStreamer ? '(Streamer)' : '(Viewer)'}</span>
+                  <span>{userName} {isStreamer ? '(Streamer)' : '(Viewer)'}</span>
                 </div>
                 
                 {peers.map((peer, index) => (
-                  <div key={index} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
+                  <div key={peer.peerId} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
                     <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
                       <span>{index + 1}</span>
                     </div>
-                    <span>Participant {index + 1} {isStreamer ? '(Viewer)' : index === 0 ? '(Streamer)' : '(Viewer)'}</span>
+                    <span>{peer.userName || `Participant ${index + 1}`} {isStreamer ? '(Viewer)' : index === 0 ? '(Streamer)' : '(Viewer)'}</span>
                   </div>
                 ))}
               </div>
@@ -394,17 +525,15 @@ const Video = ({ peer }) => {
         console.log('Received peer stream with tracks:', stream.getTracks().map(t => t.kind));
         if (ref.current) {
           ref.current.srcObject = stream;
-          // Force a play attempt
           ref.current.play().catch(err => {
             console.warn('Autoplay prevented:', err);
-            // Add a play button if autoplay is blocked
             if (err.name === 'NotAllowedError') {
               const container = ref.current.parentElement;
               const playButton = document.createElement('button');
               playButton.textContent = 'Click to Play';
-              playButton.className = 'absolute inset-0 bg-black bg-opacity-50 text-white flex items-center justify-center';
+              playButton.className = 'absolute inset-0 bg-black bg-opacity-50 text-white flex items-center justify-center cursor-pointer';
               playButton.onclick = () => {
-                ref.current.play();
+                ref.current.play().catch(console.error);
                 container.removeChild(playButton);
               };
               container.appendChild(playButton);
@@ -412,10 +541,26 @@ const Video = ({ peer }) => {
           });
         }
       });
+
+      peer.on('track', (track, stream) => {
+        console.log('Received new track:', track.kind);
+        if (ref.current) {
+          ref.current.srcObject = stream;
+        }
+      });
+
+      // Handle peer errors
+      peer.on('error', err => {
+        console.error('Peer video error:', err);
+        // Try to reconnect the video
+        if (ref.current && ref.current.srcObject) {
+          ref.current.srcObject.getTracks().forEach(track => track.stop());
+          ref.current.srcObject = null;
+        }
+      });
     }
-    
+
     return () => {
-      // Clean up on unmount
       if (ref.current && ref.current.srcObject) {
         ref.current.srcObject.getTracks().forEach(track => track.stop());
         ref.current.srcObject = null;
@@ -424,11 +569,12 @@ const Video = ({ peer }) => {
   }, [peer]);
 
   return (
-    <video 
-      ref={ref} 
-      autoPlay 
+    <video
+      ref={ref}
+      autoPlay
       playsInline
-      className="w-full h-full object-contain" 
+      className="w-full h-full object-contain"
+      style={{ display: 'block' }}
     />
   );
 };
