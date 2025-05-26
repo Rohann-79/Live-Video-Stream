@@ -2,29 +2,29 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import io from 'socket.io-client';
-import Peer from 'simple-peer';
+import StreamManager from './StreamManager';
 
 const VideoStreamingApp = () => {
   const { roomId: roomIdParam } = useParams();
   const navigate = useNavigate();
-  
-  const [peers, setPeers] = useState([]);
-  const [roomId, setRoomId] = useState(roomIdParam || '');
-  const [isStreamer, setIsStreamer] = useState(false);
-  const [joinedRoom, setJoinedRoom] = useState(!!roomIdParam);
-  const [newRoomId, setNewRoomId] = useState('');
-  const [isMuted, setIsMuted] = useState(false);
-  const [isSharing, setIsSharing] = useState(false);
-  const [userName, setUserName] = useState('');
-  const [participants, setParticipants] = useState(new Map());
-  
   const socketRef = useRef();
-  const userVideoRef = useRef();
-  const screenStreamRef = useRef();
-  const peersRef = useRef([]);
   
-  // Room creation or joining
-  const createRoom = () => {
+  const [roomId, setRoomId] = useState(roomIdParam || '');
+  const [userName, setUserName] = useState('');
+  const [isStreamer, setIsStreamer] = useState(false);
+  const [joinedRoom, setJoinedRoom] = useState(false);
+  const [participants, setParticipants] = useState(new Map());
+  const [manualRoomId, setManualRoomId] = useState('');
+
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
+  const createRoom = async () => {
     if (!userName.trim()) {
       alert('Please enter your name');
       return;
@@ -33,549 +33,235 @@ const VideoStreamingApp = () => {
     setRoomId(generatedRoomId);
     setIsStreamer(true);
     setJoinedRoom(true);
-    navigate(`/room/${generatedRoomId}`, { replace: true });
-    initializeRoom(generatedRoomId, true);
+    navigate(`/room/${generatedRoomId}`);
+    initializeSocketConnection(generatedRoomId, true);
   };
-  
-  const joinRoom = () => {
-    if (!userName.trim()) {
+
+  const joinRoom = async () => {
+    if (!roomIdParam || !userName.trim()) {
       alert('Please enter your name');
       return;
     }
-    if (!newRoomId) {
-      alert('Please enter a room ID');
-      return;
-    }
-    setRoomId(newRoomId);
     setIsStreamer(false);
     setJoinedRoom(true);
-    navigate(`/room/${newRoomId}`, { replace: true });
-    initializeRoom(newRoomId, false);
+    initializeSocketConnection(roomIdParam, false);
   };
-  
-  const initializeRoom = async (roomId, isStreamer) => {
-    socketRef.current = io.connect('http://localhost:5001');
-    
-    try {
-      // Get audio only by default
-      const audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-        video: false
-      });
-      
-      // Send user info when joining room
-      socketRef.current.emit('join-room', {
-        roomId,
-        userName: userName.trim(),
-        isStreamer
-      });
-      
-      // If streamer, they need to start a share explicitly
-      if (isStreamer) {
-        screenStreamRef.current = audioStream;
-      }
-      
-      // When a new user connects
-      socketRef.current.on('user-connected', ({ userId, userName: newUserName }) => {
-        console.log('User connected:', userId, newUserName);
-        setParticipants(prev => new Map(prev).set(userId, newUserName));
-        
-        // Only create peer if we're the streamer or if the new user is the streamer
-        const shouldCreatePeer = isStreamer || (peers.length === 0 && !isStreamer);
-        if (shouldCreatePeer) {
-          const peer = createPeer(userId, socketRef.current.id, screenStreamRef.current || audioStream);
-          
-          peersRef.current.push({
-            peerId: userId,
-            peer,
-            userName: newUserName
-          });
-          
-          setPeers(prevPeers => [...prevPeers, { peerId: userId, peer, userName: newUserName }]);
-        }
-      });
-      
-      // Receiving room info
-      socketRef.current.on('room-info', ({ participants: roomParticipants }) => {
-        const participantsMap = new Map();
-        roomParticipants.forEach(({ id, name }) => {
-          participantsMap.set(id, name);
-        });
-        setParticipants(participantsMap);
-      });
-      
-      // Receiving a call
-      socketRef.current.on('user-joined', payload => {
-        console.log('User joined with signal:', payload);
-        const peer = addPeer(payload.signal, payload.callerId, screenStreamRef.current || audioStream);
-        
-        const userName = participants.get(payload.callerId) || 'Unknown User';
-        
-        peersRef.current.push({
-          peerId: payload.callerId,
-          peer,
-          userName
-        });
-        
-        setPeers(prevPeers => [...prevPeers, { peerId: payload.callerId, peer, userName }]);
-      });
-      
-      // Receiving returned signal
-      socketRef.current.on('receiving-returned-signal', payload => {
-        const item = peersRef.current.find(p => p.peerId === payload.id);
-        if (item) {
-          item.peer.signal(payload.signal);
-        }
-      });
-      
-      // User disconnected
-      socketRef.current.on('user-disconnected', userId => {
-        console.log('User disconnected:', userId);
-        const peerObj = peersRef.current.find(p => p.peerId === userId);
-        if (peerObj) {
-          peerObj.peer.destroy();
-        }
-        
-        const peers = peersRef.current.filter(p => p.peerId !== userId);
-        peersRef.current = peers;
-        setPeers(peers);
-      });
-    } catch (err) {
-      console.error('Error getting media devices:', err);
+
+  const joinRoomWithId = async () => {
+    if (!manualRoomId.trim() || !userName.trim()) {
+      alert('Please enter both your name and room ID');
+      return;
     }
+    setRoomId(manualRoomId);
+    setIsStreamer(false);
+    setJoinedRoom(true);
+    navigate(`/room/${manualRoomId}`);
+    initializeSocketConnection(manualRoomId, false);
   };
-  
-  // Start screen sharing
-  const startScreenShare = async () => {
-    try {
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-          displaySurface: 'monitor',
-          logicalSurface: true,
-          frameRate: 30,
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        }
+
+  const initializeSocketConnection = (roomId, isStreamer) => {
+    socketRef.current = io('http://localhost:5001');
+    
+    socketRef.current.emit('join-room', {
+      roomId,
+      userName: userName.trim(),
+      isStreamer
+    });
+
+    socketRef.current.on('room-info', ({ participants: roomParticipants }) => {
+      const participantsMap = new Map();
+      roomParticipants.forEach(({ id, name }) => {
+        participantsMap.set(id, name);
       });
-      
-      // Store the screen stream reference
-      screenStreamRef.current = screenStream;
-      
-      // Add audio tracks if not present in screen share
-      const hasAudio = screenStream.getAudioTracks().length > 0;
-      if (!hasAudio) {
-        try {
-          const audioStream = await navigator.mediaDevices.getUserMedia({ 
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-            }
-          });
-          audioStream.getAudioTracks().forEach(track => {
-            screenStreamRef.current.addTrack(track);
-          });
-        } catch (err) {
-          console.warn('Could not add audio to screen share:', err);
-        }
-      }
-      
-      // Set up screen share end handler
-      screenStream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-      };
+      setParticipants(participantsMap);
+    });
 
-      // Update video element
-      if (userVideoRef.current) {
-        userVideoRef.current.srcObject = screenStreamRef.current;
-        userVideoRef.current.style.display = 'block';
-      }
-      
-      // Update all existing peers with the new stream
-      peersRef.current.forEach(({ peer }) => {
-        // First remove any existing tracks
-        const senders = peer._pc.getSenders();
-        senders.forEach(sender => {
-          if (sender.track) {
-            peer._pc.removeTrack(sender);
-          }
-        });
+    socketRef.current.on('user-connected', ({ userId, userName }) => {
+      console.log('New user connected:', userId, userName);
+      setParticipants(prev => new Map(prev).set(userId, userName));
+    });
 
-        // Then add the new tracks
-        screenStreamRef.current.getTracks().forEach(track => {
-          peer.addTrack(track, screenStreamRef.current);
-        });
+    socketRef.current.on('user-disconnected', (userId) => {
+      console.log('User disconnected:', userId);
+      setParticipants(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(userId);
+        return newMap;
       });
-      
-      setIsSharing(true);
-    } catch (err) {
-      console.error('Error starting screen share:', err);
-      setIsSharing(false);
-    }
+    });
   };
-  
-  // Stop screen sharing
-  const stopScreenShare = async () => {
-    try {
-      if (screenStreamRef.current) {
-        // Stop all tracks
-        screenStreamRef.current.getTracks().forEach(track => {
-          track.stop();
-        });
 
-        // Clear video element
-        if (userVideoRef.current) {
-          userVideoRef.current.srcObject = null;
-        }
-
-        // Get new audio-only stream for continued participation
-        const audioStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-          }
-        });
-
-        // Update screen stream reference
-        screenStreamRef.current = audioStream;
-
-        // Update all peers with audio-only stream
-        peersRef.current.forEach(({ peer }) => {
-          // Remove all existing tracks
-          const senders = peer._pc.getSenders();
-          senders.forEach(sender => {
-            if (sender.track) {
-              peer._pc.removeTrack(sender);
-            }
-          });
-
-          // Add new audio track
-          audioStream.getAudioTracks().forEach(track => {
-            peer.addTrack(track, audioStream);
-          });
-        });
-
-        setIsSharing(false);
-      }
-    } catch (err) {
-      console.error('Error stopping screen share:', err);
-      setIsSharing(false);
-    }
-  };
-  
-  // Create peer (initiator)
-  const createPeer = (userToSignal, callerId, stream) => {
-    const peer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      },
-      reconnectTimer: 1000,
-      iceTransportPolicy: 'all',
-    });
-    
-    peer.on('signal', signal => {
-      socketRef.current.emit('sending-signal', { userToSignal, callerId, signal });
-    });
-    
-    peer.on('connect', () => {
-      console.log('Peer connection established');
-    });
-    
-    peer.on('error', err => {
-      console.error('Peer connection error:', err);
-      // Attempt to reconnect on error
-      if (peer && !peer.destroyed) {
-        peer.destroy();
-        const newPeer = createPeer(userToSignal, callerId, stream);
-        // Update the peers list with the new peer
-        setPeers(prevPeers => {
-          const peerIndex = prevPeers.findIndex(p => p.peerId === userToSignal);
-          if (peerIndex !== -1) {
-            const newPeers = [...prevPeers];
-            newPeers[peerIndex] = { peerId: userToSignal, peer: newPeer };
-            return newPeers;
-          }
-          return prevPeers;
-        });
-      }
-    });
-    
-    return peer;
-  };
-  
-  // Add peer (receiver)
-  const addPeer = (incomingSignal, callerId, stream) => {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      },
-      reconnectTimer: 1000,
-      iceTransportPolicy: 'all',
-    });
-    
-    peer.on('signal', signal => {
-      socketRef.current.emit('returning-signal', { signal, callerId });
-    });
-    
-    peer.on('connect', () => {
-      console.log('Peer connection established');
-    });
-    
-    peer.on('error', err => {
-      console.error('Peer connection error:', err);
-      // Attempt to reconnect on error
-      if (peer && !peer.destroyed) {
-        peer.destroy();
-        const newPeer = addPeer(incomingSignal, callerId, stream);
-        // Update the peers list with the new peer
-        setPeers(prevPeers => {
-          const peerIndex = prevPeers.findIndex(p => p.peerId === callerId);
-          if (peerIndex !== -1) {
-            const newPeers = [...prevPeers];
-            newPeers[peerIndex] = { peerId: callerId, peer: newPeer };
-            return newPeers;
-          }
-          return prevPeers;
-        });
-      }
-    });
-    
-    peer.signal(incomingSignal);
-    
-    return peer;
-  };
-  
-  // Toggle mute
-  const toggleMute = () => {
-    if (screenStreamRef.current) {
-      const audioTracks = screenStreamRef.current.getAudioTracks();
-      audioTracks.forEach(track => {
-        track.enabled = isMuted;
-      });
-      setIsMuted(!isMuted);
-    }
-  };
-  
-  // Handle direct navigation to a room
-  useEffect(() => {
-    if (roomIdParam && !joinedRoom) {
-      setRoomId(roomIdParam);
-      setJoinedRoom(true);
-      initializeRoom(roomIdParam, false);
-    }
-  }, [roomIdParam, joinedRoom]);
-  
-  // Clean up on component unmount
-  useEffect(() => {
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-      
-      if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach(track => {
-          track.stop();
-        });
-      }
-      
-      peers.forEach(peer => {
-        peer.peer.destroy();
-      });
-    };
-  }, [peers]);
-  
-  return (
-    <div className="flex flex-col min-h-screen bg-gray-900 text-white p-4">
-      {!joinedRoom ? (
-        <div className="flex flex-col items-center justify-center flex-grow space-y-6">
-          <h1 className="text-3xl font-bold">Game Streaming App</h1>
-          <div className="flex flex-col space-y-4 w-full max-w-md">
-            <input
-              type="text"
-              placeholder="Enter Your Name"
-              value={userName}
-              onChange={(e) => setUserName(e.target.value)}
-              className="bg-gray-800 text-white px-4 py-2 rounded"
-            />
-            <button 
-              onClick={createRoom} 
-              className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded"
-            >
-              Create Streaming Room
-            </button>
-            <div className="flex flex-col space-y-2">
+  if (!joinedRoom) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <div className="bg-white p-8 rounded-lg shadow-md w-96">
+          <h2 className="text-2xl font-bold mb-6 text-center">
+            {roomIdParam ? 'Join Stream' : 'Live Stream'}
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="userName">
+                Your Name
+              </label>
               <input
                 type="text"
-                placeholder="Enter Room ID"
-                value={newRoomId}
-                onChange={(e) => setNewRoomId(e.target.value)}
-                className="bg-gray-800 text-white px-4 py-2 rounded"
+                id="userName"
+                value={userName}
+                onChange={(e) => setUserName(e.target.value)}
+                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                placeholder="Enter your name"
+                required
               />
-              <button 
-                onClick={joinRoom} 
-                className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
-              >
-                Join Stream
-              </button>
             </div>
-          </div>
-        </div>
-      ) : (
-        <div className="flex flex-col h-full">
-          <div className="flex justify-between items-center mb-4">
-            <h1 className="text-2xl font-bold">Room: {roomId}</h1>
-            <div className="flex items-center space-x-2">
-              <button 
-                onClick={toggleMute} 
-                className={`px-4 py-2 rounded font-semibold ${isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'}`}
-              >
-                {isMuted ? 'Unmute' : 'Mute'}
-              </button>
-              
-              {isStreamer && (
-                <button 
-                  onClick={isSharing ? stopScreenShare : startScreenShare} 
-                  className={`px-4 py-2 rounded font-semibold ${isSharing ? 'bg-red-600 hover:bg-red-700' : 'bg-purple-600 hover:bg-purple-700'}`}
+            
+            {roomIdParam ? (
+              // Direct room link - show join button
+              <div>
+                <p className="text-gray-600 text-sm mb-3">
+                  You're joining room: <span className="font-semibold">{roomIdParam}</span>
+                </p>
+                <button
+                  onClick={joinRoom}
+                  className="w-full bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
                 >
-                  {isSharing ? 'Stop Sharing' : 'Share Screen'}
+                  🚀 Join Stream
                 </button>
-              )}
-            </div>
-          </div>
-          
-          <div className="grid grid-cols-1 gap-4 flex-grow">
-            {/* Streamer's view */}
-            {isStreamer && (
-              <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
-                <video 
-                  ref={userVideoRef} 
-                  autoPlay 
-                  playsInline 
-                  muted 
-                  className="w-full h-full object-contain" 
-                />
-                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded">
-                  You (Streaming)
-                </div>
               </div>
-            )}
-            
-            {/* Viewer's view */}
-            {!isStreamer && peers.length > 0 && (
-              <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
-                <Video peer={peers[0].peer} />
-                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded">
-                  {peers[0].userName || 'Streamer'}
-                </div>
-              </div>
-            )}
-            
-            {/* Updated participants list */}
-            <div className="bg-gray-800 rounded-lg p-4">
-              <h3 className="text-xl font-semibold mb-2">Participants</h3>
-              <div className="space-y-2">
-                <div className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-                  <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
-                    <span>You</span>
+            ) : (
+              // Homepage - show create and join options
+              <div className="space-y-3">
+                <button
+                  onClick={createRoom}
+                  className="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+                >
+                  🎬 Create Streaming Room
+                </button>
+                
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-300" />
                   </div>
-                  <span>{userName} {isStreamer ? '(Streamer)' : '(Viewer)'}</span>
+                  <div className="relative flex justify-center text-sm">
+                    <span className="px-2 bg-white text-gray-500">OR</span>
+                  </div>
                 </div>
                 
-                {peers.map((peer, index) => (
-                  <div key={peer.peerId} className="flex items-center space-x-2 p-2 bg-gray-700 rounded">
-                    <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
-                      <span>{index + 1}</span>
-                    </div>
-                    <span>{peer.userName || `Participant ${index + 1}`} {isStreamer ? '(Viewer)' : index === 0 ? '(Streamer)' : '(Viewer)'}</span>
-                  </div>
-                ))}
+                <div>
+                  <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="roomId">
+                    Join Existing Room
+                  </label>
+                  <input
+                    type="text"
+                    id="roomId"
+                    value={manualRoomId}
+                    onChange={(e) => setManualRoomId(e.target.value.toUpperCase())}
+                    className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mb-3"
+                    placeholder="Enter Room ID (e.g., ABC123)"
+                    maxLength={5}
+                  />
+                  <button
+                    onClick={joinRoomWithId}
+                    className="w-full bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+                    disabled={!manualRoomId.trim()}
+                  >
+                    👥 Join Stream
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
-      )}
-    </div>
-  );
-};
-
-// Video component for remote peers
-const Video = ({ peer }) => {
-  const ref = useRef();
-
-  useEffect(() => {
-    if (peer) {
-      peer.on('stream', stream => {
-        console.log('Received peer stream with tracks:', stream.getTracks().map(t => t.kind));
-        if (ref.current) {
-          ref.current.srcObject = stream;
-          ref.current.play().catch(err => {
-            console.warn('Autoplay prevented:', err);
-            if (err.name === 'NotAllowedError') {
-              const container = ref.current.parentElement;
-              const playButton = document.createElement('button');
-              playButton.textContent = 'Click to Play';
-              playButton.className = 'absolute inset-0 bg-black bg-opacity-50 text-white flex items-center justify-center cursor-pointer';
-              playButton.onclick = () => {
-                ref.current.play().catch(console.error);
-                container.removeChild(playButton);
-              };
-              container.appendChild(playButton);
-            }
-          });
-        }
-      });
-
-      peer.on('track', (track, stream) => {
-        console.log('Received new track:', track.kind);
-        if (ref.current) {
-          ref.current.srcObject = stream;
-        }
-      });
-
-      // Handle peer errors
-      peer.on('error', err => {
-        console.error('Peer video error:', err);
-        // Try to reconnect the video
-        if (ref.current && ref.current.srcObject) {
-          ref.current.srcObject.getTracks().forEach(track => track.stop());
-          ref.current.srcObject = null;
-        }
-      });
-    }
-
-    return () => {
-      if (ref.current && ref.current.srcObject) {
-        ref.current.srcObject.getTracks().forEach(track => track.stop());
-        ref.current.srcObject = null;
-      }
-    };
-  }, [peer]);
+      </div>
+    );
+  }
 
   return (
-    <video
-      ref={ref}
-      autoPlay
-      playsInline
-      className="w-full h-full object-contain"
-      style={{ display: 'block' }}
-    />
+    <div className="min-h-screen bg-gray-100 p-4">
+      <div className="max-w-6xl mx-auto">
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <div className="flex justify-between items-center mb-4">
+            <h1 className="text-2xl font-bold">Room: {roomId}</h1>
+            {isStreamer && (
+              <div className="flex items-center space-x-3">
+                <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2">
+                  <div className="text-sm text-blue-600 font-medium">Share this Room ID:</div>
+                  <div className="flex items-center space-x-2">
+                    <code className="text-lg font-bold text-blue-800 bg-blue-100 px-2 py-1 rounded">
+                      {roomId}
+                    </code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(roomId);
+                        alert('Room ID copied to clipboard!');
+                      }}
+                      className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm"
+                      title="Copy Room ID"
+                    >
+                      📋 Copy
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-2">
+                  <div className="text-sm text-green-600 font-medium">Share this URL:</div>
+                  <div className="flex items-center space-x-2">
+                    <code className="text-sm text-green-800 bg-green-100 px-2 py-1 rounded">
+                      {window.location.href}
+                    </code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(window.location.href);
+                        alert('URL copied to clipboard!');
+                      }}
+                      className="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm"
+                      title="Copy URL"
+                    >
+                      📋 Copy
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <StreamManager
+            socket={socketRef.current}
+            roomId={roomId}
+            isStreamer={isStreamer}
+            userName={userName}
+          />
+        </div>
+
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h2 className="text-xl font-bold mb-4">Participants</h2>
+          <div className="space-y-2">
+            <div className="flex items-center space-x-2 p-2 bg-gray-100 rounded">
+              <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white">
+                You
+              </div>
+              <span>{userName} ({isStreamer ? 'Streamer' : 'Viewer'})</span>
+            </div>
+            {Array.from(participants.entries()).map(([id, name]) => (
+              <div key={id} className="flex items-center space-x-2 p-2 bg-gray-100 rounded">
+                <div className="w-8 h-8 bg-gray-500 rounded-full flex items-center justify-center text-white">
+                  {name[0]}
+                </div>
+                <span>{name}</span>
+              </div>
+            ))}
+          </div>
+          {isStreamer && participants.size === 0 && (
+            <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <div className="text-yellow-800">
+                <strong>💡 No viewers yet!</strong>
+                <p className="text-sm mt-1">
+                  Share your <strong>Room ID: {roomId}</strong> or the URL above with others so they can join your stream.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 };
 
