@@ -154,9 +154,9 @@ const VideoStreamingApp = () => {
                     type="text"
                     id="roomId"
                     value={manualRoomId}
-                    onChange={(e) => setManualRoomId(e.target.value.toUpperCase())}
+                    onChange={(e) => setManualRoomId(e.target.value)}
                     className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mb-3"
-                    placeholder="Enter Room ID (e.g., ABC123)"
+                    placeholder="Enter Room ID (e.g., abc123)"
                     maxLength={5}
                   />
                   <button

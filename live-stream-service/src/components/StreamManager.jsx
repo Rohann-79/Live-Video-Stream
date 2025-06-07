@@ -65,13 +65,15 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
       
       const updateAudioLevel = () => {
-        if (analyserRef.current && !isMuted && audioContextRef.current.state === 'running') {
+        if (analyserRef.current && audioContextRef.current.state === 'running') {
           analyserRef.current.getByteFrequencyData(dataArray);
           
           // Calculate average volume
           const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
           const normalizedLevel = average / 255;
           
+          // Show audio activity even when muted (for visual feedback)
+          // but the actual transmission will be controlled by track.enabled
           setAudioLevel(normalizedLevel);
           setIsAudioActive(normalizedLevel > 0.01); // Threshold for detecting audio activity
         } else {
@@ -86,7 +88,7 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
     } catch (err) {
       console.error('Error initializing audio analysis:', err);
     }
-  }, [isMuted]);
+  }, []);
 
   // Cleanup audio analysis
   const cleanupAudioAnalysis = useCallback(() => {
@@ -190,25 +192,48 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
     });
 
     peer.on('stream', stream => {
-      console.log('Received peer stream from:', callerId);
-      if (userVideoRef.current && stream && stream.getTracks().length > 0) {
+      console.log('Received peer stream from:', callerId, 'tracks:', stream.getTracks().length);
+      
+      // Check if this stream has video tracks (indicating it's from a streamer)
+      const hasVideo = stream.getVideoTracks().length > 0;
+      const hasAudio = stream.getAudioTracks().length > 0;
+      
+      console.log('Stream has video:', hasVideo, 'audio:', hasAudio);
+      
+      // If we're a viewer and received a video stream, display it immediately
+      if (!isStreamer && hasVideo && userVideoRef.current) {
+        console.log('🎥 Viewer receiving video stream from streamer - displaying immediately');
         userVideoRef.current.srcObject = stream;
-        userVideoRef.current.play().catch(err => {
-          console.warn('Autoplay prevented:', err);
-          if (err.name === 'NotAllowedError') {
-            const container = userVideoRef.current.parentElement;
-            if (container && !container.querySelector('.play-button')) {
-              const playButton = document.createElement('button');
-              playButton.textContent = 'Click to Play';
-              playButton.className = 'play-button absolute inset-0 bg-black bg-opacity-50 text-white flex items-center justify-center cursor-pointer';
-              playButton.onclick = () => {
-                userVideoRef.current.play().catch(console.error);
-                container.removeChild(playButton);
-              };
-              container.appendChild(playButton);
+        
+        // Force play immediately
+        userVideoRef.current.onloadedmetadata = () => {
+          userVideoRef.current.play().then(() => {
+            console.log('✅ Video stream playing successfully for viewer');
+          }).catch(err => {
+            console.warn('Autoplay prevented:', err);
+            if (err.name === 'NotAllowedError') {
+              const container = userVideoRef.current.parentElement;
+              if (container && !container.querySelector('.play-button')) {
+                const playButton = document.createElement('button');
+                playButton.textContent = 'Click to Play';
+                playButton.className = 'play-button absolute inset-0 bg-black bg-opacity-50 text-white flex items-center justify-center cursor-pointer';
+                playButton.onclick = () => {
+                  userVideoRef.current.play().then(() => {
+                    console.log('✅ Manual play successful');
+                    container.removeChild(playButton);
+                  }).catch(console.error);
+                };
+                container.appendChild(playButton);
+              }
             }
-          }
-        });
+          });
+        };
+      }
+      
+      // Handle audio streams for voice communication (could be from any peer)
+      if (hasAudio) {
+        console.log('Received audio stream from peer:', callerId);
+        // Audio will be played automatically through WebRTC
       }
     });
 
@@ -234,6 +259,11 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       // Clear the video element for streamer
       if (userVideoRef.current && isStreamer) {
         userVideoRef.current.srcObject = null;
+      }
+
+      // Notify all users that streaming has stopped
+      if (socket && isStreamer) {
+        socket.emit('stream-stopped', { roomId });
       }
 
       // Update all peers to remove video tracks
@@ -262,7 +292,7 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       try {
         setError(null);
         
-        // Get audio stream
+        // Get audio stream for everyone (streamer and viewers)
         const audio = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
@@ -278,10 +308,10 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
         }
         setAudioStream(audio);
         
-        // Initialize audio analysis
+        // Initialize audio analysis for local audio
         initializeAudioAnalysis(audio);
         
-        console.log('Audio stream initialized successfully');
+        console.log('Audio stream initialized successfully for', isStreamer ? 'streamer' : 'viewer');
       } catch (err) {
         console.error('Error initializing streams:', err);
         if (mounted) {
@@ -310,55 +340,59 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
         }
       });
     };
-  }, [initializeAudioAnalysis, cleanupAudioAnalysis]);
+  }, [initializeAudioAnalysis, cleanupAudioAnalysis, isStreamer]);
 
   // Update audio analysis when mute state changes
   useEffect(() => {
-    if (audioStream && !isMuted) {
-      // Only initialize audio analysis if we don't have one running
-      if (!analyserRef.current) {
-        initializeAudioAnalysis(audioStream);
-      }
+    // Update audio track enabled state for all peers when mute state changes
+    if (audioStream) {
+      const audioTracks = audioStream.getAudioTracks();
+      audioTracks.forEach(track => {
+        track.enabled = !isMuted;
+      });
     }
     
-    // When muted, just set levels to zero but don't destroy the analyzer
-    if (isMuted) {
-      setAudioLevel(0);
-      setIsAudioActive(false);
-    }
-    
-    // IMPORTANT: Never touch the video element during mute state changes
-    // The video stream should remain completely isolated from audio operations
-  }, [isMuted, audioStream, initializeAudioAnalysis]);
+    // Keep audio analysis running even when muted for visual feedback
+    // The actual audio transmission is controlled by track.enabled above
+  }, [isMuted, audioStream]);
 
   // Handle peer connections
   useEffect(() => {
     if (!socket) return;
 
-    const handleUserConnected = ({ userId, userName: newUserName }) => {
-      console.log('New user connected:', userId, newUserName);
+    const handleUserConnected = ({ userId, userName: newUserName, isStreamer: userIsStreamer }) => {
+      console.log('New user connected:', userId, newUserName, 'isStreamer:', userIsStreamer);
       
-      // Prevent self-connection and only create peer if we're the streamer and it's not ourselves
-      if (isStreamer && userId !== socket.id) {
+      // Create peer connections between all users
+      if (userId !== socket.id) {
         // Check if peer already exists
         const existingPeer = peersRef.current.find(p => p.peerId === userId);
         if (!existingPeer) {
-          // Create combined stream with both screen and audio
-          let combinedStream = null;
-          if (screenStream && audioStream) {
-            combinedStream = new MediaStream([
+          // Always send audio stream, and screen stream if we're the streamer
+          let streamToSend = null;
+          
+          if (isStreamer && screenStream && audioStream) {
+            // Streamer sends both screen and audio
+            streamToSend = new MediaStream([
               ...screenStream.getTracks(),
-              ...audioStream.getTracks().filter(track => track.enabled || !isMuted)
+              ...audioStream.getTracks()
             ]);
-          } else if (screenStream) {
-            combinedStream = screenStream;
+          } else if (isStreamer && screenStream) {
+            // Streamer sends screen only
+            streamToSend = screenStream;
           } else if (audioStream) {
-            combinedStream = audioStream;
+            // Everyone sends audio for voice communication
+            streamToSend = audioStream;
           }
 
-          const peer = createPeer(userId, socket.id, combinedStream);
+          const peer = createPeer(userId, socket.id, streamToSend);
           if (peer) {
-            const peerObj = { peerId: userId, peer, userName: newUserName };
+            const peerObj = { 
+              peerId: userId, 
+              peer, 
+              userName: newUserName,
+              isStreamer: userIsStreamer 
+            };
             peersRef.current.push(peerObj);
             setPeers(prev => [...prev, peerObj]);
           }
@@ -367,7 +401,7 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
     };
 
     const handleUserJoined = (payload) => {
-      console.log('Received call from:', payload.callerId);
+      console.log('Received call from:', payload.callerId, payload.userName);
       
       // Prevent self-connection
       if (payload.callerId === socket.id) {
@@ -378,22 +412,31 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       // Check if peer already exists
       const existingPeer = peersRef.current.find(p => p.peerId === payload.callerId);
       if (!existingPeer) {
-        // Create combined stream with both screen and audio
-        let combinedStream = null;
-        if (screenStream && audioStream) {
-          combinedStream = new MediaStream([
+        // Always send audio stream, and screen stream if we're the streamer
+        let streamToSend = null;
+        
+        if (isStreamer && screenStream && audioStream) {
+          // Streamer sends both screen and audio
+          streamToSend = new MediaStream([
             ...screenStream.getTracks(),
-            ...audioStream.getTracks().filter(track => track.enabled || !isMuted)
+            ...audioStream.getTracks()
           ]);
-        } else if (screenStream) {
-          combinedStream = screenStream;
+        } else if (isStreamer && screenStream) {
+          // Streamer sends screen only
+          streamToSend = screenStream;
         } else if (audioStream) {
-          combinedStream = audioStream;
+          // Everyone sends audio for voice communication
+          streamToSend = audioStream;
         }
 
-        const peer = addPeer(payload.signal, payload.callerId, combinedStream);
+        const peer = addPeer(payload.signal, payload.callerId, streamToSend);
         if (peer) {
-          const peerObj = { peerId: payload.callerId, peer, userName: payload.userName };
+          const peerObj = { 
+            peerId: payload.callerId, 
+            peer, 
+            userName: payload.userName,
+            isStreamer: payload.isStreamer || false
+          };
           peersRef.current.push(peerObj);
           setPeers(prev => [...prev, peerObj]);
         }
@@ -423,18 +466,44 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       setPeers(prev => prev.filter(p => p.peerId !== userId));
     };
 
+    const handleStreamStarted = () => {
+      console.log('Stream started by streamer');
+      // For viewers, prepare to receive new peer connections from streamer
+      if (!isStreamer) {
+        console.log('Viewer preparing to receive new stream connections');
+        // Clear current video to prepare for new stream
+        if (userVideoRef.current) {
+          userVideoRef.current.srcObject = null;
+        }
+      }
+    };
+
+    const handleStreamStopped = () => {
+      console.log('Stream stopped by streamer');
+      // For viewers, clear the video element
+      if (!isStreamer && userVideoRef.current) {
+        userVideoRef.current.srcObject = null;
+      }
+    };
+
+
+
     socket.on('user-connected', handleUserConnected);
     socket.on('user-joined', handleUserJoined);
     socket.on('receiving-returned-signal', handleReturnedSignal);
     socket.on('user-disconnected', handleUserDisconnected);
+    socket.on('stream-started', handleStreamStarted);
+    socket.on('stream-stopped', handleStreamStopped);
 
     return () => {
       socket.off('user-connected', handleUserConnected);
       socket.off('user-joined', handleUserJoined);
       socket.off('receiving-returned-signal', handleReturnedSignal);
       socket.off('user-disconnected', handleUserDisconnected);
+      socket.off('stream-started', handleStreamStarted);
+      socket.off('stream-stopped', handleStreamStopped);
     };
-  }, [socket, isStreamer, screenStream, audioStream, createPeer, addPeer]);
+  }, [socket, isStreamer, screenStream, audioStream, createPeer, addPeer, isMuted]);
 
   // Start screen sharing
   const startScreenShare = async () => {
@@ -464,42 +533,52 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
         };
       }
 
-      // Update all existing peers with new stream - handle video and audio separately
-      peersRef.current.forEach(({ peer }) => {
-        if (peer && peer._pc && !peer.destroyed) {
-          // Add video tracks from screen
-          screen.getVideoTracks().forEach(videoTrack => {
-            try {
-              const senders = peer._pc.getSenders();
-              const videoSender = senders.find(s => s.track && s.track.kind === 'video');
-              if (videoSender) {
-                videoSender.replaceTrack(videoTrack);
-              } else {
-                peer._pc.addTrack(videoTrack, screen);
-              }
-            } catch (err) {
-              console.error('Error updating peer video track:', err);
+      // Notify all users that streaming has started and recreate connections
+      if (socket && isStreamer) {
+        socket.emit('stream-started', { roomId });
+        
+        // Recreate all peer connections with the new stream
+        console.log('Recreating', peersRef.current.length, 'peer connections with screen stream');
+        
+        const currentPeers = [...peersRef.current];
+        
+        // Destroy existing peers
+        currentPeers.forEach(({ peer, peerId }) => {
+          if (peer && !peer.destroyed) {
+            console.log('Destroying old peer connection for', peerId);
+            peer.destroy();
+          }
+        });
+        
+        // Clear peers array
+        peersRef.current = [];
+        setPeers([]);
+        
+        // Recreate connections with new stream after a short delay
+        setTimeout(() => {
+          currentPeers.forEach(({ peerId, userName: peerUserName }) => {
+            console.log('Recreating peer connection for', peerId, 'with screen stream');
+            
+            // Create combined stream with screen and audio
+            const combinedStream = new MediaStream([
+              ...screen.getTracks(),
+              ...(audioStream ? audioStream.getTracks() : [])
+            ]);
+            
+            const newPeer = createPeer(peerId, socket.id, combinedStream);
+            if (newPeer) {
+              const peerObj = { 
+                peerId, 
+                peer: newPeer, 
+                userName: peerUserName,
+                isStreamer: false 
+              };
+              peersRef.current.push(peerObj);
+              setPeers(prev => [...prev, peerObj]);
             }
           });
-
-          // Add audio tracks separately if available and not muted
-          if (audioStream) {
-            audioStream.getAudioTracks().forEach(audioTrack => {
-              try {
-                const senders = peer._pc.getSenders();
-                const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
-                if (audioSender) {
-                  audioSender.replaceTrack(audioTrack);
-                } else {
-                  peer._pc.addTrack(audioTrack, audioStream);
-                }
-              } catch (err) {
-                console.error('Error updating peer audio track:', err);
-              }
-            });
-          }
-        }
-      });
+        }, 500);
+      }
 
       // Handle screen share stop
       screen.getVideoTracks()[0].onended = () => {
@@ -514,18 +593,12 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
   // Toggle mute
   const toggleMute = () => {
     if (audioStream) {
-      const audioTracks = audioStream.getAudioTracks();
       const newMutedState = !isMuted;
-      
-      // Simply toggle the enabled state of audio tracks
-      audioTracks.forEach(track => {
-        track.enabled = !newMutedState;
-      });
-      
       setIsMuted(newMutedState);
       console.log(`Audio ${newMutedState ? 'muted' : 'unmuted'}`);
-
-      // No need to update peers - the track enabled state handles this automatically
+      
+      // The useEffect will handle updating the track enabled state
+      // This separation prevents any interference with video streams
     } else {
       console.warn('No audio stream available to mute/unmute');
     }
@@ -588,8 +661,8 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
           {/* Audio visualizer for viewer's own mic */}
           <div className="absolute top-2 right-2 bg-black bg-opacity-50 px-3 py-2 rounded flex items-center space-x-2">
             <AudioVisualizer 
-              audioLevel={audioLevel} 
-              isActive={isAudioActive} 
+              audioLevel={isMuted ? 0 : audioLevel} 
+              isActive={!isMuted && isAudioActive} 
               isMuted={isMuted} 
             />
             <span className="text-white text-xs">
@@ -610,8 +683,8 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
       <div className="flex justify-center space-x-4">
         <div className="flex items-center space-x-2 bg-gray-100 px-4 py-2 rounded">
           <AudioVisualizer 
-            audioLevel={audioLevel} 
-            isActive={isAudioActive} 
+            audioLevel={isMuted ? 0 : audioLevel} 
+            isActive={!isMuted && isAudioActive} 
             isMuted={isMuted} 
           />
           <button
@@ -643,8 +716,8 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
           <div className="flex items-center space-x-2">
             <span>Audio:</span>
             <AudioVisualizer 
-              audioLevel={audioLevel} 
-              isActive={isAudioActive} 
+              audioLevel={isMuted ? 0 : audioLevel} 
+              isActive={!isMuted && isAudioActive} 
               isMuted={isMuted} 
             />
             <span className={`font-semibold ${
@@ -668,6 +741,8 @@ const StreamManager = ({ socket, roomId, isStreamer, userName }) => {
         </div>
         <div className="text-xs text-gray-500">
           {isAudioActive && !isMuted ? '🔊 Audio detected' : '🔇 No audio detected'}
+          <br />
+          <span className="text-xs">Level: {Math.round(audioLevel * 100)}%</span>
         </div>
       </div>
     </div>

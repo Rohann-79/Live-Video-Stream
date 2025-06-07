@@ -73,10 +73,20 @@ io.on('connection', socket => {
     }
     
     console.log('Signal from:', payload.callerId, 'to:', payload.userToSignal);
+    // Find the caller's room to get their streamer status
+    let callerIsStreamer = false;
+    for (const [roomId, room] of rooms.entries()) {
+      if (room.participants.has(payload.callerId)) {
+        callerIsStreamer = room.streamer === payload.callerId;
+        break;
+      }
+    }
+    
     io.to(payload.userToSignal).emit('user-joined', {
       signal: payload.signal,
       callerId: payload.callerId,
-      userName: payload.userName
+      userName: payload.userName,
+      isStreamer: callerIsStreamer
     });
   });
   
@@ -93,6 +103,19 @@ io.on('connection', socket => {
       id: socket.id
     });
   });
+
+  // Handle stream start/stop events
+  socket.on('stream-started', ({ roomId }) => {
+    console.log('Stream started in room:', roomId);
+    socket.to(roomId).emit('stream-started');
+  });
+
+  socket.on('stream-stopped', ({ roomId }) => {
+    console.log('Stream stopped in room:', roomId);
+    socket.to(roomId).emit('stream-stopped');
+  });
+
+
   
   // Handle disconnection
   socket.on('disconnect', () => {
