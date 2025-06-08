@@ -3,7 +3,7 @@ const path = require('path');
 module.exports = {
   entry: './src/index.js',
   output: {
-    path: path.resolve(__dirname, 'dist'),
+    path: path.resolve(__dirname, 'build'),
     filename: 'bundle.js',
     publicPath: '/',
   },
@@ -51,6 +51,10 @@ module.exports = {
     new (require('webpack')).ProvidePlugin({
       process: 'process/browser',
       Buffer: ['buffer', 'Buffer'],
+    }),
+    new (require('html-webpack-plugin'))({
+      template: './public/index.html',
+      filename: 'index.html',
     }),
   ],
 }; 
