@@ -94,7 +94,22 @@ const VideoStreamingApp = () => {
   if (!joinedRoom) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-        <div className="bg-white p-8 rounded-lg shadow-md w-96">
+        {/* Deployment Notice Banner */}
+        <div className="absolute top-0 left-0 right-0 bg-yellow-100 border-b border-yellow-300 p-3">
+          <div className="max-w-4xl mx-auto text-center">
+            <p className="text-yellow-800 text-sm">
+              <strong>⚠️ Demo Notice:</strong> This is the frontend-only deployment. 
+              The application may not work as expected since the backend is not deployed. 
+              <br />
+              <span className="text-xs">
+                Check out the <a href="https://github.com/Rohann-79/Live-Video-Stream" target="_blank" rel="noopener noreferrer" className="underline font-medium">GitHub repository</a> for backend files to run locally.
+              </span>
+            </p>
+          </div>
+        </div>
+        
+        
+        <div className="bg-white p-8 rounded-lg shadow-md w-96 mt-16">
           <h2 className="text-2xl font-bold mb-6 text-center">
             {roomIdParam ? 'Join Stream' : 'Live Stream'}
           </h2>
