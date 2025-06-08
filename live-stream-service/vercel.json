@@ -11,6 +11,13 @@
   ],
   "routes": [
     {
+      "src": "/bundle.js",
+      "dest": "/bundle.js",
+      "headers": {
+        "Content-Type": "application/javascript"
+      }
+    },
+    {
       "src": "/static/(.*)",
       "dest": "/static/$1"
     },

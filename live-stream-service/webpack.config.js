@@ -55,6 +55,19 @@ module.exports = {
     new (require('html-webpack-plugin'))({
       template: './public/index.html',
       filename: 'index.html',
+      inject: 'body',
+      scriptLoading: 'blocking',
+    }),
+    new (require('copy-webpack-plugin'))({
+      patterns: [
+        {
+          from: 'public',
+          to: '.',
+          globOptions: {
+            ignore: ['**/index.html'],
+          },
+        },
+      ],
     }),
   ],
 }; 
