@@ -115,8 +115,41 @@ io.on('connection', socket => {
     socket.to(roomId).emit('stream-stopped');
   });
 
+  // Handle chat messages
+  socket.on('chat-message', ({ roomId, message, userName, timestamp }) => {
+    console.log(`Chat message in room ${roomId} from ${userName}: ${message}`);
+    
+    // Broadcast message to all users in the room (including sender for confirmation)
+    io.to(roomId).emit('chat-message', {
+      id: socket.id,
+      userName,
+      message,
+      timestamp,
+      isOwn: false // Will be set to true on sender's client
+    });
+  });
 
-  
+  // Handle soundboard events
+  socket.on('soundboard-play', ({ roomId, soundName, userName }) => {
+    console.log(`Soundboard ${soundName} played in room ${roomId} by ${userName}`);
+    
+    // Broadcast sound event to all users in the room
+    socket.to(roomId).emit('soundboard-play', {
+      soundName,
+      userName,
+      timestamp: Date.now()
+    });
+  });
+
+  // Handle typing indicators
+  socket.on('typing-start', ({ roomId, userName }) => {
+    socket.to(roomId).emit('typing-start', { userId: socket.id, userName });
+  });
+
+  socket.on('typing-stop', ({ roomId, userName }) => {
+    socket.to(roomId).emit('typing-stop', { userId: socket.id, userName });
+  });
+
   // Handle disconnection
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);

@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import io from 'socket.io-client';
 import StreamManager from './StreamManager';
+import ChatRoom from './ChatRoom';
+import Soundboard from './Soundboard';
 
 const VideoStreamingApp = () => {
   const { roomId: roomIdParam } = useParams();
@@ -242,6 +244,23 @@ const VideoStreamingApp = () => {
             socket={socketRef.current}
             roomId={roomId}
             isStreamer={isStreamer}
+            userName={userName}
+          />
+        </div>
+
+        {/* Interactive Features Row */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {/* Chat Room */}
+          <ChatRoom 
+            socket={socketRef.current}
+            roomId={roomId}
+            userName={userName}
+          />
+          
+          {/* Soundboard */}
+          <Soundboard 
+            socket={socketRef.current}
+            roomId={roomId}
             userName={userName}
           />
         </div>
